@@ -15,6 +15,10 @@ gnoland:
 gnokey:
 	echo "Building gnokey"
 	go build -o build/gnokey ./cmd/gnokey
+# Key tool
+gnokeybk:
+	echo "Building gnokeybk"
+	go build -o build/gnokeybk ./cmd/gnokeybk
 
 # goscan scans go code to determine its AST
 goscan:
