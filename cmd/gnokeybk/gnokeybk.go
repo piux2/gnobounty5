@@ -9,10 +9,11 @@ import (
 //	"strings"
 
 //	"github.com/gnolang/gno/pkgs/amino"
+	"github.com/gnolang/gno/pkgs/crypto/bip39"
 	"github.com/gnolang/gno/pkgs/command"
 	"github.com/gnolang/gno/pkgs/crypto/keys"
 	"github.com/gnolang/gno/pkgs/crypto/keys/client"
-//	"github.com/gnolang/gno/pkgs/errors"
+	"github.com/gnolang/gno/pkgs/errors"
 //	"github.com/gnolang/gno/pkgs/sdk/vm"
 //	"github.com/gnolang/gno/pkgs/std"
 )
@@ -59,7 +60,25 @@ func backupKeyApp(cmd *command.Command, args []string, iopts interface{}) error{
 		return fmt.Errorf("%s does not exist. please add key first",name)
 	}
 	addr := info.GetAddress()
-	fmt.Println("This is your wallet address, please input corresponding mnemonic to generate back up key",addr.String())
+	cmd.Println(addr.String())
+	cmd.Println("This is your wallet address, please input corresponding mnemonic to generate back up key.")
+	// add bkkey in key store  
+	// TODO: take care  of multisig case and ledger case as in addApp()
+	var mnemonic string
+	const bip39Passphrase string = ""
+	bip39Message := "Enter your bip39 mnemonic"
+	mnemonic , err = cmd.GetString(bip39Message)
+
+	if err !=nil {
+		return err
+	}
+
+	
+     	if !bip39.IsMnemonicValid(mnemonic){
+		
+		return errors.New("invalid mnemonic")
+	
+	}
 
 	
 
