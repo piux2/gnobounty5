@@ -5,7 +5,7 @@ import (
 	"fmt"
 	//	"io/ioutil"
 	"os"
-	//	"path/filepath"
+	"path/filepath"
 	//	"strings"
 
 	//	"github.com/gnolang/gno/pkgs/amino"
@@ -40,20 +40,11 @@ func main() {
 	}
 }
 
-// localInfoBK store's back up key in a backup local storage 
-type localInfoBK struct {
-
-	Name string `json:"name"` // same as primary key
-	PubKey  crypto.PubKey `json:"pubkey"` // backup key derived from ed25519
-	PrivKeyArmor string `json:"privkey.armor"` // privated key in armored ASCII format
-	//  A ED25519 signature that sign  the  ecoded JSON string  Name + Pubkey
-	Signature  []byte `json:"signature"`
-
-}
 
 // It finds the address to the key name and ask user to generate a new  priviate key with the same  nemonic
 // and sign the relation between the  new  backup public key and  current pubkey.
 // If the name is not found, it asks user to add new key, which automatically genereate back up key.
+// TODO  Add customized entropy to generate Mnemonic.
 
 func backupKeyApp(cmd *command.Command, args []string, iopts interface{}) error {
 	opts := iopts.(client.BaseOptions)
@@ -78,8 +69,8 @@ func backupKeyApp(cmd *command.Command, args []string, iopts interface{}) error 
 	}
 
 	addr := info.GetAddress()
-	cmd.Println(addr.String())
-	cmd.Println("This is your wallet address, please input corresponding mnemonic to generate back up key.")
+	cmd.Printfln("This is your wallet address: %s", addr)
+	cmd.Printfln("Please input corresponding mnemonic to generate back up key.")
 
 	// import mnemonic and add bkkey in backup key store
 	// TODO: take care  of multisig case and ledger case as in addApp()
@@ -105,7 +96,7 @@ func backupKeyApp(cmd *command.Command, args []string, iopts interface{}) error 
 		return fmt.Errorf("Please check the pass phrase for %s, it can not unlock the keybase.", name)
 	}
 
-	kbBK := keys.NewLazyDBKeybase("keybk", opts.Home)
+	kbBK := keys.NewLazyDBKeybase("keybk", filepath.Join(opts.Home, "data"))
 	bip39Message := "Enter your bip39 mnemonic"
 	mnemonic, err := cmd.GetString(bip39Message)
 
@@ -126,20 +117,19 @@ func backupKeyApp(cmd *command.Command, args []string, iopts interface{}) error 
 	account := uint32(0)
 	index := uint32(0)
 
-	infobk, err := kbBK.CreateAccount(name, mnemonic, bip39Passphrase, passphrase, account, index)
+	infobk, err := kbBK.BackupAccount(name, mnemonic, bip39Passphrase, passphrase, account, index)
 	// verify if mnemonic generate the same address
 	addrbk := infobk.GetAddress()
 	if addr.Compare(addrbk) !=0  {
 		mnemonicMsg := "The imput mnemonic is not correct.\n %s \n"
-		addrMsg:= "It does not match the address.\n %s \n" 
-		
+		addrMsg:= "It does not match the address.\n %s \n"
 		return fmt.Errorf(
 			mnemonicMsg, mnemonic,  addrMsg , mnemonic,addr.String())
 
 	}
-	pubkeyBK := infobk.GetPubKey() 
-	cmd.Printfln("Backup pub key %s is created for address %s",pubkeyBK.String(), addrbk.String())
-	
+	pubkeyBK := infobk.GetPubKey()
+	cmd.Printfln("Backup pub key \n%s is created for address \n%s",pubkeyBK.String(), addrbk.String())
+
 
 	return nil
 }
