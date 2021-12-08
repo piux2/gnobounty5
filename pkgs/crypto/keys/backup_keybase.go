@@ -15,6 +15,7 @@ import (
 
 	"github.com/gnolang/gno/pkgs/crypto/secp256k1"
 
+	"github.com/gnolang/gno/pkgs/crypto/multisig"
 	"golang.org/x/crypto/ed25519"
 	"golang.org/x/crypto/hkdf"
 )
@@ -36,7 +37,7 @@ type infoBk struct {
 	Name         string        `json:"name"`          // same as primary key
 	PubKey       crypto.PubKey `json:"pubkey"`        // backup key derived from ed25519
 	PrivKeyArmor string        `json:"privkey.armor"` // private back key in armored ASCII format
-
+	MultisigInfo Info          `json:"multisig_info"` // Multisig  holds the primary pubkey and back pubkey as a 2/2 multisig
 	//  A Secp256k1 signature.
 	//  Use the primary priv key sign  the  ecoded JSON string back up info Name + Pubkey(backup)+PrivKeyArmo(backup)
 	//  The signature  is to show that infoBk is created by the primary key holder.
@@ -48,6 +49,7 @@ type infoBk struct {
 	PrimaryPubKey crypto.PubKey `json:"primary_pubkey"`
 }
 
+//ask the compiler to check infoBk type implements Info interface
 var _ Info = &infoBk{}
 
 func newInfoBk(name string, pub crypto.PubKey, privArmor string) Info {
@@ -97,9 +99,9 @@ func BackupAccount(kbBk Keybase, name, mnemonic, bip39Passwd, encryptPasswd stri
 
 func CreateAccountBip44(kbBk Keybase, name, mnemonic, bip39Passphrase, encryptPasswd string, params hd.BIP44Params) (Info, error) {
 
-	//bip39 used  PBKDF2 to hash the mnemonic. PBKDF2 is a pass word hash function not really a
-	//   KDF which provides key extraction and extension
-	// Here it is still a seed
+	//bip39 uses  PBKDF2 to hash the mnemonic. PBKDF2 is a pass word hash function and not a
+	// KDF which provides key extraction and extension
+	// at this point the seed is still a seed not a private key yet.
 	seed, err := bip39.NewSeedWithErrorChecking(mnemonic, bip39Passphrase)
 	if err != nil {
 		return infoBk{}, err
@@ -110,14 +112,15 @@ func CreateAccountBip44(kbBk Keybase, name, mnemonic, bip39Passphrase, encryptPa
 }
 
 // nake return and name return variable
+// persistBkKey uses the same seed to derive both primary key and backup key and
+// use primary key to sign the backup key info to key the backup key's integrity
+// TODO: review: create multisig threshold and adds to InfoBk. This way no need to
+// manage multisig process in seperate entity.
 
 func persistBkKey(kbBk Keybase, seed []byte, name, passwd, fullHdPath string) (Info, error) {
 	//create master key and derive first key:
 	// masterPriv is from hmac no KDF performanced
 	masterPriv, ch := hd.ComputeMastersFromSeed(seed)
-	//  hd.DerivePrivateKeyForPath tried prevent using secp256k1
-	//  but later  in pkgs/crypto/keys/keybase.go persistDerivedKey(), it still use secp256k1 to generate pubkey
-	//  it defeats the purose of avoiding secp256k1 in hdpath.go derivePrivateKey()
 
 	derivedPriv, err := hd.DerivePrivateKeyForPath(masterPriv, ch, fullHdPath)
 	if err != nil {
@@ -128,7 +131,7 @@ func persistBkKey(kbBk Keybase, seed []byte, name, passwd, fullHdPath string) (I
 
 	//The back up key need a simple Sha256 based KDF  which is different from the primary key
 
-	//  We can use HKDF for KDF
+	//We can use HKDF for KDF
 	//https://rfc-editor.org/rfc/rfc5869.html
 	// hkdf does not expect the salt to be a secret.
 	hash := sha256.New
@@ -164,21 +167,57 @@ func persistBkKey(kbBk Keybase, seed []byte, name, passwd, fullHdPath string) (I
 
 func writeLocalBkKey(kbBk Keybase, name string, bkKey crypto.PrivKey, primaryKey crypto.PrivKey, passphrase string) (Info, error) {
 
+	//TODO: updated the armored privKey file with correct passwd encryption notaion
+	// bcrypt is not KDF. It is a secure hash to protect the password
 	privArmor := armor.EncryptArmorPrivKey(bkKey, passphrase)
 	pub := bkKey.PubKey()
 	info := newInfoBk(name, pub, privArmor)
+	fmt.Println("back up PubKey", pub)
+	fmt.Println("privArmor", privArmor)
+
+	// sign  name+pubkey+privArmor + multisiginfo
+
+	infobk := info.(*infoBk)
+	pubkeys := []crypto.PubKey{
+		primaryKey.PubKey(), //primary pubkey
+		pub,                 //backup pubkey
+	}
+
+	multisig := multisig.NewPubKeyMultisigThreshold(2, pubkeys)
+	infobk.MultisigInfo = NewMultiInfo("backup", multisig)
+
 	//TODO: disussion,  could use a document structure. json is simple and good enough  for now.
 	msg, err := json.Marshal(info)
+	fmt.Println("msg", msg)
 
-	// sign only name+pubkey+privArmor
-	infobk := info.(*infoBk)
-	//  only name + PubKey + PrivKeyArmor
+	//  sign  name + PubKey + PrivKeyArmor + MultisgInfo
+	//  To show that the multisig is created by the primary key holder
 	infobk.Signature, err = primaryKey.Sign(msg)
-	// attach the pubkey in the end
+	fmt.Println("Signature", infobk.Signature)
+
+	// attach the primary pubkey in the end. it is used to verify the signature and pubkey
 	infobk.PrimaryPubKey = primaryKey.PubKey()
+	fmt.Println("PrimaryPubkey", infobk.PrimaryPubKey.String())
 
 	k := kbBk.(dbKeybase)
 
 	k.writeInfo(name, infobk)
 	return info.(*infoBk), err
+}
+
+
+// Sign uses primary key and backup key to sign the message with the multisig
+// The primary keybase and backup keybase must be accessible.
+
+func Sign(kbPrimary Keybase, kbBk Keybase, name, passPhrase string, msg []byte) (sig []byte, pub crypto.PubKey, err error) {
+
+	kbPrimary.
+
+	//sign the message
+
+}
+
+// Verify verifies the msg signed by primaryKey and backupKey multisig
+func Verify(kbBk Keybase, name string, msg []byte, sig []byte) (err error) {
+
 }
