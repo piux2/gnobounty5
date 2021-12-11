@@ -35,7 +35,7 @@ func (m *Machine) doOpArrayType() {
 			// This is how run-time untyped const
 			// conversions would work, but we
 			// expect the preprocessor to convert
-			// these to *constExpr.
+			// these to *ConstExpr.
 			// Numeric untyped types are always constant.
 			/*
 				// Convert if untyped.
@@ -167,7 +167,7 @@ func (m *Machine) doOpChanType() {
 
 // Evaluate the type of a typed (i.e. not untyped) value.
 // This function expects const expressions to have been
-// already swapped for *constExpr in the preprocessor.  If not, panics.
+// already swapped for *ConstExpr in the preprocessor.  If not, panics.
 func (m *Machine) doOpStaticTypeOf() {
 	x := m.PopExpr()
 	switch x := x.(type) {
@@ -175,16 +175,16 @@ func (m *Machine) doOpStaticTypeOf() {
 		// NOTE: duplicated from doOpEval
 		if x.Path.Depth == 0 {
 			// Name is in uverse (global).
-			gv := Uverse().GetPointerTo(nil, x.Path)
+			gv := Uverse().GetBlock(nil).GetPointerTo(nil, x.Path)
 			m.PushValue(asValue(gv.TV.T))
 		} else {
 			// Get static type from source.
 			lb := m.LastBlock()
-			st := lb.Source.GetStaticTypeOfAt(m.Store, x.Path)
+			st := lb.GetSource(m.Store).GetStaticTypeOfAt(m.Store, x.Path)
 			m.PushValue(asValue(st))
 		}
 	case *BasicLitExpr:
-		// Should already be swapped for *constExpr.
+		// Should already be swapped for *ConstExpr.
 		// Also, this isn't needed.
 		panic("*BasicLitExpr not supported with OpStaticTypeOf")
 	case *BinaryExpr:
@@ -294,7 +294,7 @@ func (m *Machine) doOpStaticTypeOf() {
 				m.Run() // XXX replace
 				xv := m.ReapValues(start)[0]
 				pv := xv.V.(*PackageValue)
-				t := pv.Source.GetStaticTypeOfAt(m.Store, x.Path)
+				t := pv.GetBlock(m.Store).GetSource(m.Store).GetStaticTypeOfAt(m.Store, x.Path)
 				m.PushValue(asValue(t))
 				return
 			default:
@@ -505,7 +505,7 @@ func (m *Machine) doOpStaticTypeOf() {
 		m.PushOp(OpEval)
 	case TypeExpr:
 		m.PushValue(asValue(gTypeType))
-	case *constExpr:
+	case *ConstExpr:
 		m.PushValue(asValue(x.T))
 	default:
 		panic(fmt.Sprintf(

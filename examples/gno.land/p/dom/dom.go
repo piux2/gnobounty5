@@ -3,7 +3,6 @@ package dom
 import (
 	"strconv"
 
-	//"github.com/gnolang/gno/examples/gno.land/p/avl"
 	"gno.land/p/avl"
 )
 

@@ -1,16 +1,14 @@
 package vm
 
 import (
+	"strings"
+
+	"github.com/gnolang/gno"
 	"github.com/gnolang/gno/pkgs/amino"
 	"github.com/gnolang/gno/pkgs/crypto"
 	"github.com/gnolang/gno/pkgs/sdk"
 	"github.com/gnolang/gno/pkgs/std"
 )
-
-type NamedFile struct {
-	Name string
-	Body string
-}
 
 //----------------------------------------
 // MsgAddPackage
@@ -18,19 +16,28 @@ type NamedFile struct {
 // MsgAddPackage - create and initialize new package
 type MsgAddPackage struct {
 	Creator crypto.Address `json:"creator" yaml:"creator"`
-	PkgPath string         `json:"pkg_path" yaml:"pkg_path"`
-	Files   []NamedFile    `json:"files" yaml:"files"`
+	Package std.MemPackage `json:"package" yaml:"package"`
 	Deposit std.Coins      `json:"deposit" yaml:"deposit"`
 }
 
 var _ std.Msg = MsgAddPackage{}
 
 // NewMsgAddPackage - upload a package with files.
-func NewMsgAddPackage(creator crypto.Address, pkgPath string, files []NamedFile) MsgAddPackage {
+func NewMsgAddPackage(creator crypto.Address, pkgPath string, files []std.MemFile) MsgAddPackage {
+	var pkgName string
+	for _, file := range files {
+		if strings.HasSuffix(file.Name, ".go") {
+			pkgName = string(gno.PackageNameFromFileBody(file.Body))
+			break
+		}
+	}
 	return MsgAddPackage{
 		Creator: creator,
-		PkgPath: pkgPath,
-		Files:   files,
+		Package: std.MemPackage{
+			Name:  pkgName,
+			Path:  pkgPath,
+			Files: files,
+		},
 	}
 }
 
@@ -45,7 +52,7 @@ func (msg MsgAddPackage) ValidateBasic() error {
 	if msg.Creator.IsZero() {
 		return std.ErrInvalidAddress("missing creator address")
 	}
-	if msg.PkgPath == "" { // XXX
+	if msg.Package.Path == "" { // XXX
 		return ErrInvalidPkgPath("missing package path")
 	}
 	if !msg.Deposit.IsValid() {
@@ -71,58 +78,60 @@ func (msg MsgAddPackage) GetReceived() std.Coins {
 }
 
 //----------------------------------------
-// MsgExec
+// MsgCall
 
-// MsgExec - executes a Gno statement.
-type MsgExec struct {
+// MsgCall - executes a Gno statement.
+type MsgCall struct {
 	Caller  crypto.Address `json:"caller" yaml:"caller"`
-	PkgPath string         `json:"pkg_path" yaml:"pkg_path"`
-	Stmt    string         `json:"stmt" yaml:"stmt"`
 	Send    std.Coins      `json:"send" yaml:"send"`
+	PkgPath string         `json:"pkg_path" yaml:"pkg_path"`
+	Func    string         `json:"func" yaml:"func"`
+	Args    []string       `json:"args" yaml:"args"`
 }
 
-var _ std.Msg = MsgExec{}
+var _ std.Msg = MsgCall{}
 
-func NewMsgExec(caller crypto.Address, pkgPath, stmt string, send sdk.Coins) MsgExec {
-	return MsgExec{
+func NewMsgCall(caller crypto.Address, send sdk.Coins, pkgPath, fnc string, args []string) MsgCall {
+	return MsgCall{
 		Caller:  caller,
-		PkgPath: pkgPath,
-		Stmt:    stmt,
 		Send:    send,
+		PkgPath: pkgPath,
+		Func:    fnc,
+		Args:    args,
 	}
 }
 
 // Implements Msg.
-func (msg MsgExec) Route() string { return RouterKey }
+func (msg MsgCall) Route() string { return RouterKey }
 
 // Implements Msg.
-func (msg MsgExec) Type() string { return "exec" }
+func (msg MsgCall) Type() string { return "exec" }
 
 // Implements Msg.
-func (msg MsgExec) ValidateBasic() error {
+func (msg MsgCall) ValidateBasic() error {
 	if msg.Caller.IsZero() {
 		return std.ErrInvalidAddress("missing caller address")
 	}
 	if msg.PkgPath == "" { // XXX
 		return ErrInvalidPkgPath("missing package path")
 	}
-	if msg.Stmt == "" { // XXX
-		return ErrInvalidExpr("missing expression to evaluate")
+	if msg.Func == "" { // XXX
+		return ErrInvalidExpr("missing function to call")
 	}
 	return nil
 }
 
 // Implements Msg.
-func (msg MsgExec) GetSignBytes() []byte {
+func (msg MsgCall) GetSignBytes() []byte {
 	return std.MustSortJSON(amino.MustMarshalJSON(msg))
 }
 
 // Implements Msg.
-func (msg MsgExec) GetSigners() []crypto.Address {
+func (msg MsgCall) GetSigners() []crypto.Address {
 	return []crypto.Address{msg.Caller}
 }
 
 // Implements ReceiveMsg.
-func (msg MsgExec) GetReceived() std.Coins {
+func (msg MsgCall) GetReceived() std.Coins {
 	return msg.Send
 }

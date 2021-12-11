@@ -39,64 +39,35 @@ import (
 	"unicode/utf8"
 
 	"github.com/gnolang/gno"
+	dbm "github.com/gnolang/gno/pkgs/db"
+	osm "github.com/gnolang/gno/pkgs/os"
+	"github.com/gnolang/gno/pkgs/store/dbadapter"
+	"github.com/gnolang/gno/pkgs/store/iavl"
+	stypes "github.com/gnolang/gno/pkgs/store/types"
+	"github.com/gnolang/gno/stdlibs"
 )
 
 // NOTE: this isn't safe.
-func testStore(out io.Writer) (store gno.Store) {
-	cache := make(map[string]*gno.PackageValue)
+func testStore(out io.Writer, isRealm bool) (store gno.Store) {
 	getPackage := func(pkgPath string) (pv *gno.PackageValue) {
-		// look up cache.
-		if pv, exists := cache[pkgPath]; exists {
-			if pv == nil {
-				panic(fmt.Sprintf(
-					"import cycle detected: %q",
-					pkgPath))
-			}
-			return pv
-		}
-		// set entry to detect import cycles.
-		cache[pkgPath] = nil
-		// defer: save to cache.
-		defer func() {
-			cache[pkgPath] = pv
-		}()
-		// construct test package value.
+		// if _test package...
 		const testPath = "github.com/gnolang/gno/_test/"
 		if strings.HasPrefix(pkgPath, testPath) {
 			baseDir := filepath.Join("./files/extern", pkgPath[len(testPath):])
-			pkgName := defaultPkgName(pkgPath)
-			files, err := ioutil.ReadDir(baseDir)
-			if err != nil {
-				panic(err)
-			}
-			fnodes := []*gno.FileNode{}
-			for i, file := range files {
-				if filepath.Ext(file.Name()) != ".go" {
-					continue
-				}
-				fpath := filepath.Join(baseDir, file.Name())
-				fnode := gno.MustReadFile(fpath)
-				if i == 0 {
-					pkgName = fnode.PkgName
-				} else if fnode.PkgName != pkgName {
-					panic(fmt.Sprintf(
-						"expected package name %q but got %v",
-						pkgName,
-						fnode.PkgName))
-				}
-				fnodes = append(fnodes, fnode)
-			}
-			pkg := gno.NewPackageNode(pkgName, pkgPath, nil)
-			pv := pkg.NewPackage()
+			memPkg := gno.ReadMemPackage(baseDir, pkgPath)
 			m2 := gno.NewMachineWithOptions(gno.MachineOptions{
-				Package: pv,
+				Package: nil,
 				Output:  out,
 				Store:   store,
 			})
-			m2.RunFiles(fnodes...)
-			return pv
+			// pkg := gno.NewPackageNode(gno.Name(memPkg.Name), memPkg.Path, nil)
+			// pv := pkg.NewPackage()
+			// m2.SetActivePackage(pv)
+			m2.RunMemPackage(memPkg, isRealm)
+			return m2.Package
 		}
-		// construct built-in package value.
+		// TODO: if isRealm, can we panic here?
+		// otherwise, built-in package value.
 		switch pkgPath {
 		case "fmt":
 			pkg := gno.NewPackageNode("fmt", pkgPath, nil)
@@ -244,13 +215,6 @@ func testStore(out io.Writer) (store gno.Store) {
 			pkg.DefineGoNativeValue("WithValue", context.WithValue)
 			pkg.DefineGoNativeValue("Background", context.Background)
 			return pkg.NewPackage()
-		case "strconv":
-			pkg := gno.NewPackageNode("strconv", pkgPath, nil)
-			pkg.DefineGoNativeType(reflect.TypeOf(strconv.NumError{}))
-			pkg.DefineGoNativeValue("Atoi", strconv.Atoi)
-			pkg.DefineGoNativeValue("Itoa", strconv.Itoa)
-			pkg.DefineGoNativeValue("ParseInt", strconv.ParseInt)
-			return pkg.NewPackage()
 		case "sync":
 			pkg := gno.NewPackageNode("sync", pkgPath, nil)
 			pkg.DefineGoNativeType(reflect.TypeOf(sync.Mutex{}))
@@ -310,14 +274,64 @@ func testStore(out io.Writer) (store gno.Store) {
 			pkg.DefineGoNativeValue("New32a", fnv.New32a)
 			return pkg.NewPackage()
 		default:
-			panic("unknown package path " + pkgPath)
+			// continue on...
 		}
+		// if stdlibs package...
+		stdlibPath := filepath.Join("../stdlibs", pkgPath)
+		if osm.DirExists(stdlibPath) {
+			memPkg := gno.ReadMemPackage(stdlibPath, pkgPath)
+			m2 := gno.NewMachineWithOptions(gno.MachineOptions{
+				Package: nil,
+				Output:  out,
+				Store:   store,
+			})
+			m2.RunMemPackage(memPkg, isRealm)
+			pv := m2.Package
+			return pv
+		}
+		// if examples package...
+		examplePath := filepath.Join("../examples", pkgPath)
+		if osm.DirExists(examplePath) {
+			memPkg := gno.ReadMemPackage(examplePath, pkgPath)
+			m2 := gno.NewMachineWithOptions(gno.MachineOptions{
+				Package: nil,
+				Output:  out,
+				Store:   store,
+			})
+			m2.RunMemPackage(memPkg, isRealm)
+			return m2.Package
+		}
+		panic("unknown package path " + pkgPath)
 	}
-	tstore := gno.TestStore{
-		GetPackageFn: getPackage,
+	// NOTE: store is also used in closure above.
+	db := dbm.NewMemDB()
+	baseStore := dbadapter.StoreConstructor(db, stypes.StoreOptions{})
+	iavlStore := iavl.StoreConstructor(db, stypes.StoreOptions{})
+	store = gno.NewStore(baseStore, iavlStore)
+	store.SetPackageGetter(getPackage)
+	store.SetPackageInjector(testPackageInjector)
+	return
+}
+
+//----------------------------------------
+// testInjectNatives
+// analogous to stdlibs.InjectNatives, but with
+// native methods suitable for the testing environment.
+
+func testPackageInjector(store gno.Store, pn *gno.PackageNode, pv *gno.PackageValue) {
+	// Also inject stdlibs native functions.
+	stdlibs.InjectPackage(store, pn, pv)
+	// Test specific injections:
+	switch pv.PkgPath {
+	case "strconv":
+		// NOTE: Itoa and Atoi are already injected
+		// from stdlibs.InjectNatives.
+		pn.DefineGoNativeType(reflect.TypeOf(strconv.NumError{}))
+		pn.DefineGoNativeValue("ParseInt", strconv.ParseInt)
+		pn.PrepareNewValues(pv)
+	case "std":
+		// Nothing to do, see stdlibs/InjectPackage.
 	}
-	cstore := gno.NewCacheStore(tstore)
-	return cstore
 }
 
 //----------------------------------------

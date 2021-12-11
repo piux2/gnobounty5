@@ -450,6 +450,10 @@ func (n PackageNode) String() string {
 	return fmt.Sprintf("package(%s)", n.PkgName)
 }
 
+func (n RefNode) String() string {
+	return fmt.Sprintf("ref(%s)", n.Location.String())
+}
+
 //----------------------------------------
 // Node slice strings
 // NOTE: interface-generics or?
@@ -526,7 +530,7 @@ func (ds Decls) String() string {
 	return str
 }
 
-func (cx constExpr) String() string {
+func (cx ConstExpr) String() string {
 	return fmt.Sprintf("(const %s)", cx.TypedValue.String())
 }
 

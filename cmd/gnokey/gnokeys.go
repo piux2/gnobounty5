@@ -3,11 +3,9 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
-	"path/filepath"
-	"strings"
 
+	"github.com/gnolang/gno"
 	"github.com/gnolang/gno/pkgs/amino"
 	"github.com/gnolang/gno/pkgs/command"
 	"github.com/gnolang/gno/pkgs/crypto/keys"
@@ -43,9 +41,9 @@ var makeTxApps client.AppList = []client.AppItem{
 	{makeAddPackageTxApp,
 		"addpkg", "upload new package",
 		defaultMakeAddPackageTxOptions},
-	{makeExecTxApp,
-		"exec", "execute statement",
-		defaultmakeExecTxOptions},
+	{makeCallTxApp,
+		"call", "call public function",
+		defaultmakeCallTxOptions},
 }
 
 func makeTxApp(cmd *command.Command, args []string, iopts interface{}) error {
@@ -125,35 +123,8 @@ func makeAddPackageTxApp(cmd *command.Command, args []string, iopts interface{})
 		panic(err)
 	}
 
-	// read all files.
-	dir, err := os.Open(opts.PkgDir)
-	if err != nil {
-		panic(err)
-	}
-	defer dir.Close()
-	entries, err := dir.Readdir(0)
-	if err != nil {
-		panic(err)
-	}
-
-	// For each file in the directory, filter by pattern
-	namedfiles := []vm.NamedFile{}
-	for _, entry := range entries {
-		name := entry.Name()
-		if strings.HasSuffix(name, ".go") {
-			fpath := filepath.Join(
-				opts.PkgDir, name)
-			body, err := os.ReadFile(fpath)
-			if err != nil {
-				return errors.Wrap(err, "reading gno file")
-			}
-			namedfiles = append(namedfiles,
-				vm.NamedFile{
-					Name: name,
-					Body: string(body),
-				})
-		}
-	}
+	// open files in directory as MemPackage.
+	memPkg := gno.ReadMemPackage(opts.PkgDir, opts.PkgPath)
 
 	// parse gas wanted & fee.
 	gaswanted := opts.GasWanted
@@ -164,8 +135,7 @@ func makeAddPackageTxApp(cmd *command.Command, args []string, iopts interface{})
 	// construct msg & tx and marshal.
 	msg := vm.MsgAddPackage{
 		Creator: creator,
-		PkgPath: opts.PkgPath,
-		Files:   namedfiles,
+		Package: memPkg,
 		Deposit: deposit,
 	}
 	tx := std.Tx{
@@ -179,31 +149,31 @@ func makeAddPackageTxApp(cmd *command.Command, args []string, iopts interface{})
 }
 
 //----------------------------------------
-// makeExecTxApp
+// makeCallTxApp
 
-type makeExecTxOptions struct {
-	client.BaseOptions        // home,...
-	BaseTxOptions             // gas-wanted, gas-fee, memo, ...
-	PkgPath            string `flag:"pkgpath" help:"package path (required)"`
-	Stmt               string `flag:"stmt" help:"statement to execute" (required)"`
-	StmtFile           string `flag:"stmtfile" help:"statement file instead of inline"`
-	Send               string `flag:"send" help:"send coins"`
+type makeCallTxOptions struct {
+	client.BaseOptions          // home,...
+	BaseTxOptions               // gas-wanted, gas-fee, memo, ...
+	Send               string   `flag:"send" help:"send coins"`
+	PkgPath            string   `flag:"pkgpath" help:"package path (required)"`
+	Func               string   `flag:"func" help:"contract to call" (required)"`
+	Args               []string `flag:"args" help:"arguments to contract"`
 }
 
-var defaultmakeExecTxOptions = makeExecTxOptions{
-	PkgPath:  "", // must override
-	Stmt:     "", // must override
-	StmtFile: "", // must override
-	Send:     "",
+var defaultmakeCallTxOptions = makeCallTxOptions{
+	PkgPath: "", // must override
+	Func:    "", // must override
+	Args:    nil,
+	Send:    "",
 }
 
-func makeExecTxApp(cmd *command.Command, args []string, iopts interface{}) error {
-	opts := iopts.(makeExecTxOptions)
+func makeCallTxApp(cmd *command.Command, args []string, iopts interface{}) error {
+	opts := iopts.(makeCallTxOptions)
 	if opts.PkgPath == "" {
 		return errors.New("pkgpath not specified")
 	}
-	if opts.Stmt == "" && opts.StmtFile == "" {
-		return errors.New("stmt (or stmtfile) not specified")
+	if opts.Func == "" {
+		return errors.New("func not specified")
 	}
 	if len(args) != 1 {
 		cmd.ErrPrintfln("Usage: exec <keyname>")
@@ -217,14 +187,7 @@ func makeExecTxApp(cmd *command.Command, args []string, iopts interface{}) error
 	}
 
 	// read statement.
-	stmt := opts.Stmt
-	if opts.StmtFile != "" {
-		bz, err := ioutil.ReadFile(opts.StmtFile)
-		if err != nil {
-			return errors.Wrap(err, "loading statement file")
-		}
-		stmt = string(bz)
-	}
+	fnc := opts.Func
 
 	// read account pubkey.
 	name := args[0]
@@ -253,11 +216,12 @@ func makeExecTxApp(cmd *command.Command, args []string, iopts interface{}) error
 	}
 
 	// construct msg & tx and marshal.
-	msg := vm.MsgExec{
+	msg := vm.MsgCall{
 		Caller:  caller,
-		PkgPath: opts.PkgPath,
-		Stmt:    stmt,
 		Send:    send,
+		PkgPath: opts.PkgPath,
+		Func:    fnc,
+		Args:    opts.Args,
 	}
 	tx := std.Tx{
 		Msgs:       []std.Msg{msg},

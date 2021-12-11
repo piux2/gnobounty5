@@ -21,10 +21,17 @@ func (v DataByteValue) String() string {
 
 func (v *ArrayValue) String() string {
 	ss := make([]string, len(v.List))
-	for i, e := range v.List {
-		ss[i] = e.String()
+	if v.Data == nil {
+		for i, e := range v.List {
+			ss[i] = e.String()
+		}
+		// NOTE: we may want to unify the representation,
+		// but for now tests expect this to be different.
+		// This may be helpful for testing implementation behavior.
+		return "array[" + strings.Join(ss, ",") + "]"
+	} else {
+		return fmt.Sprintf("array[0x%X]", v.Data)
 	}
-	return "array[" + strings.Join(ss, ",") + "]"
 }
 
 func (v *SliceValue) String() string {
@@ -50,7 +57,7 @@ func (v PointerValue) String() string {
 	// NOTE: cannot do below, due to recursion problems.
 	// TODO: create a different String2(...) function.
 	// return fmt.Sprintf("&%s", v.TypedValue.String())
-	return fmt.Sprintf("&%p (*%s)", v.TV, v.TV.T.String())
+	return fmt.Sprintf("&%p.(*%s)", v.TV, v.TV.T.String())
 }
 
 func (v *StructValue) String() string {
@@ -139,6 +146,11 @@ func (v *NativeValue) String() string {
 }
 
 func (v RefValue) String() string {
-	return fmt.Sprintf("ref(%v)",
-		v.ObjectID)
+	if v.PkgPath == "" {
+		return fmt.Sprintf("ref(%v)",
+			v.ObjectID)
+	} else {
+		return fmt.Sprintf("ref(%s)",
+			v.PkgPath)
+	}
 }

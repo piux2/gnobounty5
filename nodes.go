@@ -2,9 +2,14 @@ package gno
 
 import (
 	"fmt"
+	"io/ioutil"
+	"path/filepath"
 	"reflect"
 	rdebug "runtime/debug"
 	"strconv"
+	"strings"
+
+	"github.com/gnolang/gno/pkgs/std"
 )
 
 //----------------------------------------
@@ -103,41 +108,70 @@ const (
 type Name string
 
 //----------------------------------------
+// Location
+// Acts as an identifier for nodes.
+
+type Location struct {
+	PkgPath string
+	File    string
+	Line    int
+	Nonce   int
+}
+
+func (loc Location) String() string {
+	if loc.Nonce == 0 {
+		return fmt.Sprintf("%s/%s:%d",
+			loc.PkgPath,
+			loc.File,
+			loc.Line,
+		)
+	} else {
+		return fmt.Sprintf("%s/%s:%d#%d",
+			loc.PkgPath,
+			loc.File,
+			loc.Line,
+			loc.Nonce,
+		)
+	}
+}
+
+func (loc Location) IsZero() bool {
+	return loc.PkgPath == "" &&
+		loc.File == "" &&
+		loc.Line == 0 &&
+		loc.Nonce == 0
+}
+
+//----------------------------------------
 // Attributes
 // All nodes have attributes for general analysis purposes.
 // Exported Attribute fields like Loc and Label are persisted
 // even after preprocessing.  Temporary attributes (e.g. those
 // for preprocessing) are stored in .data.
 
-type Location struct {
-	PkgPath string
-	File    string
-	Line    int
-}
-
 type Attributes struct {
-	Loc   Location
+	Line  int
 	Label Name
 	data  map[interface{}]interface{} // not persisted
 }
 
-func (a *Attributes) GetLocation() Location {
-	return a.Loc
+func (attr *Attributes) GetLine() int {
+	return attr.Line
 }
 
-func (a *Attributes) SetLocation(loc Location) {
-	a.Loc = loc
+func (attr *Attributes) SetLine(line int) {
+	attr.Line = line
 }
 
-func (a *Attributes) GetAttribute(key interface{}) interface{} {
-	return a.data[key]
+func (attr *Attributes) GetAttribute(key interface{}) interface{} {
+	return attr.data[key]
 }
 
-func (a *Attributes) SetAttribute(key interface{}, value interface{}) {
-	if a.data == nil {
-		a.data = make(map[interface{}]interface{})
+func (attr *Attributes) SetAttribute(key interface{}, value interface{}) {
+	if attr.data == nil {
+		attr.data = make(map[interface{}]interface{})
 	}
-	a.data[key] = value
+	attr.data[key] = value
 }
 
 //----------------------------------------
@@ -147,8 +181,8 @@ type Node interface {
 	assertNode()
 	String() string
 	Copy() Node
-	GetLocation() Location
-	SetLocation(Location)
+	GetLine() int
+	SetLine(int)
 	GetAttribute(key interface{}) interface{}
 	SetAttribute(key interface{}, value interface{})
 }
@@ -168,7 +202,7 @@ func (_ *UnaryExpr) assertNode()         {}
 func (_ *CompositeLitExpr) assertNode()  {}
 func (_ *KeyValueExpr) assertNode()      {}
 func (_ *FuncLitExpr) assertNode()       {}
-func (_ *constExpr) assertNode()         {}
+func (_ *ConstExpr) assertNode()         {}
 func (_ *FieldTypeExpr) assertNode()     {}
 func (_ *ArrayTypeExpr) assertNode()     {}
 func (_ *SliceTypeExpr) assertNode()     {}
@@ -221,7 +255,7 @@ var _ Node = &UnaryExpr{}
 var _ Node = &CompositeLitExpr{}
 var _ Node = &KeyValueExpr{}
 var _ Node = &FuncLitExpr{}
-var _ Node = &constExpr{}
+var _ Node = &ConstExpr{}
 var _ Node = &FieldTypeExpr{}
 var _ Node = &ArrayTypeExpr{}
 var _ Node = &SliceTypeExpr{}
@@ -288,7 +322,7 @@ func (*UnaryExpr) assertExpr()        {}
 func (*CompositeLitExpr) assertExpr() {}
 func (*KeyValueExpr) assertExpr()     {}
 func (*FuncLitExpr) assertExpr()      {}
-func (*constExpr) assertExpr()        {}
+func (*ConstExpr) assertExpr()        {}
 
 var _ Expr = &NameExpr{}
 var _ Expr = &BasicLitExpr{}
@@ -304,7 +338,7 @@ var _ Expr = &UnaryExpr{}
 var _ Expr = &CompositeLitExpr{}
 var _ Expr = &KeyValueExpr{}
 var _ Expr = &FuncLitExpr{}
-var _ Expr = &constExpr{}
+var _ Expr = &ConstExpr{}
 
 type NameExpr struct {
 	Attributes
@@ -442,8 +476,8 @@ type FuncLitExpr struct {
 }
 
 // The preprocessor replaces const expressions
-// with *constExpr nodes.
-type constExpr struct {
+// with *ConstExpr nodes.
+type ConstExpr struct {
 	Attributes
 	Source Expr // (preprocessed) source of this value.
 	TypedValue
@@ -577,7 +611,7 @@ type StructTypeExpr struct {
 	Fields FieldTypeExprs // list of field declarations
 }
 
-// Like constExpr but for types.
+// Like ConstExpr but for types.
 type constTypeExpr struct {
 	Attributes
 	Source Expr
@@ -1007,6 +1041,59 @@ type FileSet struct {
 	Files []*FileNode
 }
 
+// TODO replace with some more efficient method
+// that doesn't involve parsing the whole file.
+func PackageNameFromFileBody(body string) Name {
+	n := MustParseFile("dontcare.go", body)
+	return n.PkgName
+}
+
+func ReadMemPackage(dir string, pkgPath string) std.MemPackage {
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		panic(err)
+	}
+	var memPkg = std.MemPackage{Path: pkgPath}
+	var pkgName Name
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+		fpath := filepath.Join(dir, file.Name())
+		bz, err := ioutil.ReadFile(fpath)
+		if err != nil {
+			panic(err)
+		}
+		if pkgName == "" && strings.HasSuffix(file.Name(), ".go") {
+			pkgName = PackageNameFromFileBody(string(bz))
+		}
+		memPkg.Files = append(memPkg.Files,
+			std.MemFile{
+				Name: file.Name(),
+				Body: string(bz),
+			})
+	}
+	memPkg.Name = string(pkgName)
+	return memPkg
+}
+
+func ParseMemPackage(memPkg std.MemPackage) (fset *FileSet) {
+	fset = &FileSet{}
+	for _, mfile := range memPkg.Files {
+		if !strings.HasSuffix(mfile.Name, ".go") {
+			continue // skip this file.
+		}
+		n := MustParseFile(mfile.Name, mfile.Body)
+		if memPkg.Name != string(n.PkgName) {
+			panic(fmt.Sprintf(
+				"expected package name [%s] but got [%s]",
+				memPkg.Name, n.PkgName))
+		}
+		fset.AddFiles(n)
+	}
+	return fset
+}
+
 func (fs *FileSet) AddFiles(fns ...*FileNode) {
 	fs.Files = append(fs.Files, fns...)
 }
@@ -1064,19 +1151,28 @@ type PackageNode struct {
 	*FileSet
 }
 
+func PackageNodeLocation(path string) Location {
+	return Location{
+		PkgPath: path,
+		File:    "",
+		Line:    0,
+	}
+}
+
 func NewPackageNode(name Name, path string, fset *FileSet) *PackageNode {
 	pn := &PackageNode{
 		PkgPath: path,
 		PkgName: Name(name),
 		FileSet: fset,
 	}
+	pn.SetLocation(PackageNodeLocation(path))
 	pn.InitStaticBlock(pn, nil)
 	return pn
 }
 
 func (pn *PackageNode) NewPackage() *PackageValue {
 	pv := &PackageValue{
-		Block: Block{
+		Block: &Block{
 			Source: pn,
 		},
 		PkgName:    pn.PkgName,
@@ -1089,6 +1185,7 @@ func (pn *PackageNode) NewPackage() *PackageValue {
 		rlm := NewRealm(pn.PkgPath)
 		pv.SetRealm(rlm)
 	}
+	pv.IncRefCount() // all package values have starting ref count of 1.
 	pn.PrepareNewValues(pv)
 	return pv
 }
@@ -1098,11 +1195,20 @@ func (pn *PackageNode) NewPackage() *PackageValue {
 // After return, *PackageNode.Values and *PackageValue.Values have the same
 // length.
 // TODO split logic and/or name resulting function(s) better. PrepareNewValues?
+// XXX Wait, so PackageNode>*DeclarledType>Methods>*FuncValue.PkgPath etc doesn't
+// XXX get set until it's used via pn.NewPackage()?  Fix this sooner!
 func (pn *PackageNode) PrepareNewValues(pv *PackageValue) []TypedValue {
-	if pv.Source != pn {
-		panic("PackageNode.PrepareNewValues() package mismatch")
+	// should already exist.
+	block := pv.Block.(*Block)
+	if block.Source != pn {
+		// special case if block.Source is ref node
+		if ref, ok := block.Source.(RefNode); ok && ref.Location == PackageNodeLocation(pv.PkgPath) {
+			// this is fine
+		} else {
+			panic("PackageNode.PrepareNewValues() package mismatch")
+		}
 	}
-	pvl := len(pv.Values)
+	pvl := len(block.Values)
 	pnl := len(pn.Values)
 	if pvl < pnl {
 		// XXX: deep copy heap values
@@ -1169,8 +1275,8 @@ func (pn *PackageNode) PrepareNewValues(pv *PackageValue) []TypedValue {
 				// already shallowed copied.
 			}
 		}
-		pv.Values = append(pv.Values, nvs...)
-		return pv.Values[pvl:]
+		block.Values = append(block.Values, nvs...)
+		return block.Values[pvl:]
 	} else if pvl > pnl {
 		panic("package size error")
 	} else {
@@ -1203,6 +1309,19 @@ func (pn *PackageNode) DefineNative(n Name, ps, rs FieldTypeExprs, native func(*
 }
 
 //----------------------------------------
+// RefNode
+
+// Reference to a node by its location.
+type RefNode struct {
+	Location  Location // location of node.
+	BlockNode          // convenience to implement BlockNode (nil).
+}
+
+func (rn RefNode) GetLocation() Location {
+	return rn.Location
+}
+
+//----------------------------------------
 // BlockNode
 
 // Nodes that create their own scope satisfy this interface.
@@ -1210,6 +1329,8 @@ type BlockNode interface {
 	Node
 	InitStaticBlock(BlockNode, BlockNode)
 	GetStaticBlock() *StaticBlock
+	GetLocation() Location
+	SetLocation(Location)
 
 	// StaticBlock promoted methods
 	GetBlockNames() []Name
@@ -1239,6 +1360,7 @@ type StaticBlock struct {
 	Names    []Name
 	Consts   []Name // TODO consider merging with Names.
 	Externs  []Name
+	Loc      Location
 }
 
 // Implements BlockNode
@@ -1269,6 +1391,16 @@ func (sb *StaticBlock) InitStaticBlock(source BlockNode, parent BlockNode) {
 // Implements BlockNode.
 func (sb *StaticBlock) GetStaticBlock() *StaticBlock {
 	return sb
+}
+
+// Implements BlockNode.
+func (sb *StaticBlock) GetLocation() Location {
+	return sb.Loc
+}
+
+// Implements BlockNode.
+func (sb *StaticBlock) SetLocation(loc Location) {
+	sb.Loc = loc
 }
 
 // Does not implement BlockNode to prevent confusion.
@@ -1307,7 +1439,7 @@ func (sb *StaticBlock) GetParentNode(store Store) BlockNode {
 	if pblock == nil {
 		return nil
 	} else {
-		return pblock.Source
+		return pblock.GetSource(store)
 	}
 }
 
@@ -1323,7 +1455,7 @@ func (sb *StaticBlock) GetPathForName(store Store, n Name) ValuePath {
 	if idx, ok := sb.GetLocalIndex(n); ok {
 		return NewValuePathBlock(uint8(gen), idx, n)
 	} else {
-		if !isFile(sb.Source) {
+		if !isFile(sb.GetSource(store)) {
 			sb.GetStaticBlock().addExternName(n)
 		}
 		gen++
@@ -1501,17 +1633,21 @@ func (sb *StaticBlock) Define2(isConst bool, n Name, st Type, tv TypedValue) {
 	if exists {
 		// Is re-defining.
 		if isConst != sb.getLocalIsConst(n) {
-			panic("StaticBlock.Define2() cannot change const status")
+			panic(fmt.Sprintf(
+				"StaticBlock.Define2(%s) cannot change const status",
+				n))
 		}
 		old := sb.Block.Values[idx]
 		if !old.IsUndefined() {
 			if tv.T != old.T {
 				panic(fmt.Sprintf(
-					"StaticBlock.Define2() cannot change .T; was %v, new %v",
-					old.T, tv.T))
+					"StaticBlock.Define2(%s) cannot change .T; was %v, new %v",
+					n, old.T, tv.T))
 			}
 			if tv.V != old.V {
-				panic("StaticBlock.Define2() cannot change .V")
+				panic(fmt.Sprintf(
+					"StaticBlock.Define2(%s) cannot change .V",
+					n))
 			}
 		}
 		sb.Block.Values[idx] = tv
@@ -1545,6 +1681,7 @@ var _ BlockNode = &SwitchClauseStmt{}
 var _ BlockNode = &FuncDecl{}
 var _ BlockNode = &FileNode{}
 var _ BlockNode = &PackageNode{}
+var _ BlockNode = RefNode{}
 
 func (ifs *IfStmt) GetBody() Body {
 	panic("IfStmt has no body (but .Then and .Else do)")

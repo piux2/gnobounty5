@@ -15,6 +15,10 @@ import (
 	"testing"
 
 	"github.com/gnolang/gno"
+	"github.com/gnolang/gno/pkgs/crypto"
+	"github.com/gnolang/gno/pkgs/sdk/testutils"
+	"github.com/gnolang/gno/pkgs/std"
+	"github.com/gnolang/gno/stdlibs"
 )
 
 func TestFileStr(t *testing.T) {
@@ -51,16 +55,31 @@ func runCheck(t *testing.T, path string) {
 	pkgName := defaultPkgName(pkgPath)
 	pn := gno.NewPackageNode(pkgName, pkgPath, &gno.FileSet{})
 	pv := pn.NewPackage()
-	rlm := pv.GetRealm()
-	if rlm != nil {
-		rlm.SetLogRealmOps(true)
-	}
+	isRealm := pv.IsRealm() // enable diff persistence.
 
-	var output = new(bytes.Buffer)
+	output := new(bytes.Buffer)
+	store := testStore(output, isRealm)
+	store.SetLogStoreOps(true)
+	caller := testutils.TestAddress("testaddr____________")
+	txSend := std.MustParseCoins("100gnots")
+	pkgCoins := std.MustParseCoins("200gnots") // >= txSend.
+	pkgAddr := testutils.TestAddress("packageaddr_________")
+	banker := newtestBanker(pkgAddr, pkgCoins)
+	ctx := stdlibs.ExecContext{
+		ChainID:     "testchain",
+		Height:      123,
+		Msg:         nil,
+		Caller:      caller,
+		TxSend:      txSend,
+		TxSendSpent: new(std.Coins),
+		PkgAddr:     pkgAddr,
+		Banker:      banker,
+	}
 	m := gno.NewMachineWithOptions(gno.MachineOptions{
 		Package: pv,
 		Output:  output,
-		Store:   testStore(output),
+		Store:   store,
+		Context: ctx,
 	})
 	// TODO support stdlib groups, but make testing safe;
 	// e.g. not be able to make network connections.
@@ -79,7 +98,9 @@ func runCheck(t *testing.T, path string) {
 				if r := recover(); r != nil {
 					pnc = r
 					if errWanted == "" {
-						// unexpected: print stack.
+						// unexpected: print output.
+						fmt.Println("OUTPUT:\n", output.String())
+						// print stack.
 						rtdb.PrintStack()
 					}
 					err := strings.TrimSpace(fmt.Sprintf("%v", pnc))
@@ -90,14 +111,83 @@ func runCheck(t *testing.T, path string) {
 					}
 				}
 			}()
-			n := gno.MustParseFile(path, string(bz))
-			m.RunFiles(n)
-			if rops != "" {
-				// clear rlm.ropslog from init funtion(s).
-				rlm := pv.GetRealm()
-				rlm.SetLogRealmOps(true) // resets.
+			if testing.Verbose() {
+				t.Log("========================================")
+				t.Log("RUN FILES & INIT")
+				t.Log("========================================")
 			}
-			m.RunMain()
+			if !pv.IsRealm() {
+				// simple case.
+				n := gno.MustParseFile(path, string(bz)) // "main.go", string(bz))
+				m.RunFiles(n)
+				if testing.Verbose() {
+					t.Log("========================================")
+					t.Log("RUN MAIN")
+					t.Log("========================================")
+				}
+				m.RunMain()
+				if testing.Verbose() {
+					t.Log("========================================")
+					t.Log("RUN MAIN END")
+					t.Log("========================================")
+				}
+			} else {
+				// realm case.
+				// save package using realm crawl procedure.
+				memPkg := std.MemPackage{
+					Name: string(pkgName),
+					Path: pkgPath,
+					Files: []std.MemFile{
+						{
+							Name: "main.go", // dontcare
+							Body: string(bz),
+						},
+					},
+				}
+				m.RunMemPackage(memPkg, true)
+				if rops != "" {
+					// clear store.opslog from init funtion(s).
+					store.SetLogStoreOps(true) // resets.
+				}
+				// reconstruct machine and clear store cache.
+				// whether pv is realm or not, since non-realm
+				// may call realm packages too.
+				if testing.Verbose() {
+					t.Log("========================================")
+					t.Log("CLEAR STORE CACHE")
+					t.Log("========================================")
+				}
+				store.ClearCache()
+				pv2 := pv
+				if pv.IsRealm() {
+					pv2 = store.GetPackage(pkgPath) // load from backend
+				}
+				m2 := gno.NewMachineWithOptions(gno.MachineOptions{
+					Package: pv2,
+					Output:  output,
+					Store:   store,
+					Context: ctx,
+				})
+				if testing.Verbose() {
+					store.Print()
+					t.Log("========================================")
+					t.Log("PREPROCESS ALL FILES")
+					t.Log("========================================")
+				}
+				m2.PreprocessAllFilesAndSaveBlockNodes()
+				if testing.Verbose() {
+					t.Log("========================================")
+					t.Log("RUN MAIN")
+					t.Log("========================================")
+					store.Print()
+				}
+				m2.RunMain()
+				if testing.Verbose() {
+					t.Log("========================================")
+					t.Log("RUN MAIN END")
+					t.Log("========================================")
+				}
+			}
 		}()
 		// check errors
 		if errWanted != "" {
@@ -133,11 +223,7 @@ func runCheck(t *testing.T, path string) {
 		}
 		// check realm ops
 		if rops != "" {
-			rlm := pv.GetRealm()
-			if rlm == nil {
-				panic("expected realm but got none")
-			}
-			rops2 := strings.TrimSpace(rlm.SprintRealmOps())
+			rops2 := strings.TrimSpace(store.SprintStoreOps())
 			if rops != rops2 {
 				panic(fmt.Sprintf("got:\n%s\n\nwant:\n%s\n", rops2, rops))
 			}
@@ -199,4 +285,70 @@ func defaultPkgName(gopkgPath string) gno.Name {
 	name := parts[len(parts)-1]
 	name = strings.ToLower(name)
 	return gno.Name(name)
+}
+
+//----------------------------------------
+// testBanker
+
+type testBanker struct {
+	coinTable map[crypto.Address]std.Coins
+}
+
+func newtestBanker(args ...interface{}) *testBanker {
+	return &testBanker{
+		coinTable: make(map[crypto.Address]std.Coins),
+	}
+}
+
+func (tb *testBanker) GetCoins(addr crypto.Address, dst *std.Coins) {
+	coins, exists := tb.coinTable[addr]
+	if !exists {
+		*dst = nil
+	} else {
+		*dst = coins
+	}
+}
+
+func (tb *testBanker) SendCoins(from, to crypto.Address, amt std.Coins) {
+	fcoins, fexists := tb.coinTable[from]
+	if !fexists {
+		panic(fmt.Sprintf(
+			"source address %s does not exist",
+			from.String()))
+	}
+	if !fcoins.IsAllGTE(amt) {
+		panic(fmt.Sprintf(
+			"source address %s has %s; cannot send %s",
+			from.String(), fcoins, amt))
+	}
+	// First, subtract from 'from'.
+	frest := fcoins.Sub(amt)
+	tb.setCoins(from, frest)
+	// Second, add to 'to'.
+	// NOTE: even works when from==to, due to 2-step isolation.
+	tcoins, _ := tb.coinTable[to]
+	tsum := tcoins.Add(amt)
+	tb.setCoins(to, tsum)
+}
+
+func (tb *testBanker) setCoins(addr crypto.Address, amt std.Coins) {
+	coins, _ := tb.coinTable[addr]
+	sum := coins.Add(amt)
+	tb.coinTable[addr] = sum
+}
+
+func (tb *testBanker) TotalCoin(denom string) int64 {
+	panic("not yet implemented")
+}
+
+func (tb *testBanker) IssueCoin(addr crypto.Address, denom string, amt int64) {
+	coins, _ := tb.coinTable[addr]
+	sum := coins.Add(std.Coins{{denom, amt}})
+	tb.setCoins(addr, sum)
+}
+
+func (tb *testBanker) RemoveCoin(addr crypto.Address, denom string, amt int64) {
+	coins, _ := tb.coinTable[addr]
+	rest := coins.Sub(std.Coins{{denom, amt}})
+	tb.setCoins(addr, rest)
 }

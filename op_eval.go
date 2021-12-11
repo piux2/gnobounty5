@@ -19,7 +19,7 @@ func (m *Machine) doOpEval() {
 		m.PopExpr()
 		if nx.Path.Depth == 0 {
 			// Name is in uverse (global).
-			gv := Uverse().GetPointerTo(nil, nx.Path)
+			gv := Uverse().GetBlock(nil).GetPointerTo(nil, nx.Path)
 			m.PushValue(gv.Deref())
 			return
 		} else {
@@ -179,7 +179,7 @@ func (m *Machine) doOpEval() {
 		// evaluate func type
 		m.PushExpr(&x.Type)
 		m.PushOp(OpEval)
-	case *constExpr:
+	case *ConstExpr:
 		m.PopExpr()
 		// push preprocessed value
 		m.PushValue(x.TypedValue)

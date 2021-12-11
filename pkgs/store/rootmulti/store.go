@@ -202,7 +202,7 @@ func (ms *multiStore) MultiCacheWrap() types.MultiStore {
 		stores[k] = v
 	}
 
-	return cachemulti.New(ms.db, stores, ms.keysByName)
+	return cachemulti.New(stores, ms.keysByName)
 }
 
 // Implements MultiStore.
@@ -227,7 +227,7 @@ func (ms *multiStore) MultiImmutableCacheWrapWithVersion(version int64) (types.M
 	for storeKey, store := range ims.stores {
 		stores[storeKey] = immut.New(store)
 	}
-	return cachemulti.New(ims.db, stores, ims.keysByName), nil
+	return cachemulti.New(stores, ims.keysByName), nil
 }
 
 // Implements MultiStore.
@@ -462,7 +462,16 @@ func commitStores(version int64, storeMap map[types.StoreKey]types.CommitStore) 
 	for key, store := range storeMap {
 		// Commit
 		commitID := store.Commit()
-
+		/* Print all items.
+		itr := store.Iterator(nil, nil)
+		for ; itr.Valid(); itr.Next() {
+			k, v := itr.Key(), itr.Value()
+			fmt.Println("STORE ENTRY",
+			colors.ColoredBytes(k, colors.Green, colors.Blue),
+			colors.ColoredBytes(v, colors.Cyan, colors.Blue))
+		}
+		itr.Close()
+		*/
 		// Record CommitID
 		si := storeInfo{}
 		si.Name = key.Name()

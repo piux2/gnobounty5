@@ -21,6 +21,7 @@ here would be better just to add to the Context struct
 */
 type Context struct {
 	ctx           context.Context
+	mode          RunTxMode
 	ms            store.MultiStore
 	header        abci.Header
 	chainID       string
@@ -29,7 +30,6 @@ type Context struct {
 	voteInfo      []abci.VoteInfo
 	gasMeter      store.GasMeter // XXX make passthroughGasMeter w/ blockGasMeter?
 	blockGasMeter store.GasMeter
-	checkTx       bool
 	minGasPrices  []GasPrice
 	consParams    *abci.ConsensusParams
 	eventLogger   *EventLogger
@@ -40,6 +40,7 @@ type Request = Context
 
 // Read-only accessors
 func (c Context) Context() context.Context      { return c.ctx }
+func (c Context) Mode() RunTxMode               { return c.mode }
 func (c Context) MultiStore() store.MultiStore  { return c.ms }
 func (c Context) BlockHeight() int64            { return c.header.GetHeight() }
 func (c Context) BlockTime() time.Time          { return c.header.GetTime() }
@@ -49,7 +50,7 @@ func (c Context) Logger() log.Logger            { return c.logger }
 func (c Context) VoteInfos() []abci.VoteInfo    { return c.voteInfo }
 func (c Context) GasMeter() store.GasMeter      { return c.gasMeter }
 func (c Context) BlockGasMeter() store.GasMeter { return c.blockGasMeter }
-func (c Context) IsCheckTx() bool               { return c.checkTx }
+func (c Context) IsCheckTx() bool               { return c.mode == RunTxModeCheck }
 func (c Context) MinGasPrices() []GasPrice      { return c.minGasPrices }
 func (c Context) EventLogger() *EventLogger     { return c.eventLogger }
 
@@ -64,13 +65,16 @@ func (c Context) ConsensusParams() *abci.ConsensusParams {
 }
 
 // create a new context
-func NewContext(ms store.MultiStore, header abci.Header, isCheckTx bool, logger log.Logger) Context {
+func NewContext(mode RunTxMode, ms store.MultiStore, header abci.Header, logger log.Logger) Context {
+	if header.GetChainID() == "" {
+		panic("header chain id cannot be empty")
+	}
 	return Context{
 		ctx:          context.Background(),
+		mode:         mode,
 		ms:           ms,
 		header:       header,
 		chainID:      header.GetChainID(),
-		checkTx:      isCheckTx,
 		logger:       logger,
 		gasMeter:     store.NewInfiniteGasMeter(),
 		minGasPrices: nil,
@@ -80,6 +84,11 @@ func NewContext(ms store.MultiStore, header abci.Header, isCheckTx bool, logger 
 
 func (c Context) WithContext(ctx context.Context) Context {
 	c.ctx = ctx
+	return c
+}
+
+func (c Context) WithMode(mode RunTxMode) Context {
+	c.mode = mode
 	return c
 }
 
@@ -123,11 +132,6 @@ func (c Context) WithBlockGasMeter(meter store.GasMeter) Context {
 	return c
 }
 
-func (c Context) WithIsCheckTx(isCheckTx bool) Context {
-	c.checkTx = isCheckTx
-	return c
-}
-
 func (c Context) WithMinGasPrices(gasPrices []GasPrice) Context {
 	c.minGasPrices = gasPrices
 	return c
@@ -168,7 +172,7 @@ func (c Context) Value(key interface{}) interface{} {
 // Store / Caching
 // ----------------------------------------------------------------------------
 
-// Store fetches a Store from the MultiStore.
+// Store fetches a Store from the MultiStore, but wrapped for gas calculation.
 func (c Context) Store(key store.StoreKey) store.Store {
 	return gas.New(c.MultiStore().GetStore(key), c.GasMeter(), store.DefaultGasConfig())
 }

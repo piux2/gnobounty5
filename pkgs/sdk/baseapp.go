@@ -20,21 +20,7 @@ import (
 
 // Key to store the consensus params in the main store.
 var mainConsensusParamsKey = []byte("consensus_params")
-
-// Enum mode for app.runTx
-type runTxMode uint8
-
-const (
-	// Check a transaction
-	runTxModeCheck runTxMode = iota
-	// Simulate a transaction
-	runTxModeSimulate runTxMode = iota
-	// Deliver a transaction
-	runTxModeDeliver runTxMode = iota
-
-	// MainStoreKey is the string representation of the main store
-	MainStoreKey = "main"
-)
+var mainLastHeaderKey = []byte("last_header")
 
 // BaseApp reflects the ABCI application implementation.
 type BaseApp struct {
@@ -46,7 +32,8 @@ type BaseApp struct {
 	router Router                 // handle any kind of message
 
 	// set upon LoadVersion or LoadLatestVersion.
-	baseKey store.StoreKey // Main Store in cms
+	baseKey store.StoreKey // Base Store in cms (raw db, not hashed)
+	mainKey store.StoreKey // Main Store in cms (e.g. iavl, merkle-ized)
 
 	anteHandler  AnteHandler  // ante handler for fee and auth
 	initChainer  InitChainer  // initialize state with validators and state blob
@@ -91,15 +78,17 @@ var _ abci.Application = (*BaseApp)(nil)
 //
 // NOTE: The db is used to store the version number for now.
 func NewBaseApp(
-	name string, logger log.Logger, db dbm.DB, options ...func(*BaseApp),
+	name string, logger log.Logger, db dbm.DB, baseKey store.StoreKey, mainKey store.StoreKey, options ...func(*BaseApp),
 ) *BaseApp {
 
 	app := &BaseApp{
-		logger: logger,
-		name:   name,
-		db:     db,
-		cms:    store.NewCommitMultiStore(db),
-		router: NewRouter(),
+		logger:  logger,
+		name:    name,
+		db:      db,
+		cms:     store.NewCommitMultiStore(db),
+		router:  NewRouter(),
+		baseKey: baseKey,
+		mainKey: mainKey,
 	}
 	for _, option := range options {
 		option(app)
@@ -137,22 +126,24 @@ func (app *BaseApp) MountStore(key store.StoreKey, cons store.CommitStoreConstru
 
 // LoadLatestVersion loads the latest application version. It will panic if
 // called more than once on a running BaseApp.
-func (app *BaseApp) LoadLatestVersion(baseKey store.StoreKey) error {
+// This, or LoadVersion() MUST be called even after first init.
+func (app *BaseApp) LoadLatestVersion() error {
 	err := app.cms.LoadLatestVersion()
 	if err != nil {
 		return err
 	}
-	return app.initFromMainStore(baseKey)
+	return app.initFromMainStore()
 }
 
 // LoadVersion loads the BaseApp application version. It will panic if called
 // more than once on a running baseapp.
-func (app *BaseApp) LoadVersion(version int64, baseKey store.StoreKey) error {
+// This, or LoadLatestVersion() MUST be called even after first init.
+func (app *BaseApp) LoadVersion(version int64) error {
 	err := app.cms.LoadVersion(version)
 	if err != nil {
 		return err
 	}
-	return app.initFromMainStore(baseKey)
+	return app.initFromMainStore()
 }
 
 // LastCommitID returns the last CommitID of the multistore.
@@ -165,18 +156,16 @@ func (app *BaseApp) LastBlockHeight() int64 {
 	return app.cms.LastCommitID().Version
 }
 
-// initializes the remaining logic from app.cms
-func (app *BaseApp) initFromMainStore(baseKey store.StoreKey) error {
-	mainStore := app.cms.GetStore(baseKey)
+// initializes the app from app.cms after loading.
+func (app *BaseApp) initFromMainStore() error {
+	baseStore := app.cms.GetStore(app.baseKey)
+	if baseStore == nil {
+		return errors.New("baseapp expects MultiStore with 'base' Store")
+	}
+	mainStore := app.cms.GetStore(app.mainKey)
 	if mainStore == nil {
 		return errors.New("baseapp expects MultiStore with 'main' Store")
 	}
-
-	// memoize baseKey
-	if app.baseKey != nil {
-		panic("app.baseKey expected to be nil; duplicate init?")
-	}
-	app.baseKey = baseKey
 
 	// Load the consensus params from the main store. If the consensus params are
 	// nil, it will be saved later during InitChain.
@@ -193,8 +182,18 @@ func (app *BaseApp) initFromMainStore(baseKey store.StoreKey) error {
 		app.setConsensusParams(consensusParams)
 	}
 
-	// needed for the export command which inits from store but never calls initchain
-	app.setCheckState(&bft.Header{})
+	// Load the consensus header from the main store.
+	// This is needed to setCheckState with the right chainID etc.
+	lastHeaderBz := baseStore.Get(mainLastHeaderKey)
+	if lastHeaderBz != nil {
+		var lastHeader = &bft.Header{}
+		err := amino.Unmarshal(lastHeaderBz, lastHeader)
+		if err != nil {
+			panic(err)
+		}
+		app.setCheckState(lastHeader)
+	}
+	// Done.
 	app.Seal()
 
 	return nil
@@ -235,11 +234,11 @@ func (app *BaseApp) setCheckState(header abci.Header) {
 	ms := app.cms.MultiCacheWrap()
 	app.checkState = &state{
 		ms:  ms,
-		ctx: NewContext(ms, header, true, app.logger).WithMinGasPrices(app.minGasPrices),
+		ctx: NewContext(RunTxModeCheck, ms, header, app.logger).WithMinGasPrices(app.minGasPrices),
 	}
 }
 
-// setCheckState sets checkState with the cached multistore and
+// setDeliverState sets deliverState with the cached multistore and
 // the context wrapping it.
 // It is called by InitChain() and BeginBlock(),
 // and deliverState is set nil on Commit().
@@ -247,7 +246,7 @@ func (app *BaseApp) setDeliverState(header abci.Header) {
 	ms := app.cms.MultiCacheWrap()
 	app.deliverState = &state{
 		ms:  ms,
-		ctx: NewContext(ms, header, false, app.logger),
+		ctx: NewContext(RunTxModeDeliver, ms, header, app.logger),
 	}
 }
 
@@ -262,7 +261,7 @@ func (app *BaseApp) storeConsensusParams(consensusParams *abci.ConsensusParams) 
 	if err != nil {
 		panic(err)
 	}
-	mainStore := app.cms.GetStore(app.baseKey)
+	mainStore := app.cms.GetStore(app.mainKey)
 	mainStore.Set(mainConsensusParamsKey, consensusParamsBz)
 }
 
@@ -483,9 +482,7 @@ func handleQueryCustom(app *BaseApp, path []string, req abci.RequestQuery) (res 
 	}
 
 	// cache wrap the commit-multistore for safety
-	ctx := NewContext(
-		cacheMS, app.checkState.ctx.BlockHeader(), true, app.logger,
-	).WithMinGasPrices(app.minGasPrices)
+	ctx := NewContext(RunTxModeCheck, cacheMS, app.checkState.ctx.BlockHeader(), app.logger).WithMinGasPrices(app.minGasPrices)
 
 	// Passes the query to the handler.
 	res = handler.Query(ctx, req)
@@ -556,7 +553,7 @@ func (app *BaseApp) CheckTx(req abci.RequestCheckTx) (res abci.ResponseCheckTx) 
 		res.Error = ABCIError(std.ErrTxDecode(err.Error()))
 		return
 	} else {
-		result := app.runTx(runTxModeCheck, req.Tx, tx)
+		result := app.runTx(RunTxModeCheck, req.Tx, tx)
 		res.ResponseBase = result.ResponseBase
 		res.GasWanted = result.GasWanted
 		res.GasUsed = result.GasUsed
@@ -572,7 +569,7 @@ func (app *BaseApp) DeliverTx(req abci.RequestDeliverTx) (res abci.ResponseDeliv
 		res.Error = ABCIError(std.ErrTxDecode(err.Error()))
 		return
 	} else {
-		result := app.runTx(runTxModeDeliver, req.Tx, tx)
+		result := app.runTx(RunTxModeDeliver, req.Tx, tx)
 		res.ResponseBase = result.ResponseBase
 		res.GasWanted = result.GasWanted
 		res.GasUsed = result.GasUsed
@@ -598,13 +595,14 @@ func validateBasicTxMsgs(msgs []Msg) error {
 }
 
 // retrieve the context for the tx w/ txBytes and other memoized values.
-func (app *BaseApp) getContextForTx(mode runTxMode, txBytes []byte) (ctx Context) {
+func (app *BaseApp) getContextForTx(mode RunTxMode, txBytes []byte) (ctx Context) {
 	ctx = app.getState(mode).ctx.
+		WithMode(mode).
 		WithTxBytes(txBytes).
 		WithVoteInfos(app.voteInfos).
 		WithConsensusParams(app.consensusParams)
 
-	if mode == runTxModeSimulate {
+	if mode == RunTxModeSimulate {
 		ctx, _ = ctx.CacheContext()
 	}
 
@@ -612,7 +610,7 @@ func (app *BaseApp) getContextForTx(mode runTxMode, txBytes []byte) (ctx Context
 }
 
 /// runMsgs iterates through all the messages and executes them.
-func (app *BaseApp) runMsgs(ctx Context, msgs []Msg, mode runTxMode) (result Result) {
+func (app *BaseApp) runMsgs(ctx Context, msgs []Msg, mode RunTxMode) (result Result) {
 	msgLogs := make([]string, 0, len(msgs))
 
 	data := make([]byte, 0, len(msgs))
@@ -634,7 +632,7 @@ func (app *BaseApp) runMsgs(ctx Context, msgs []Msg, mode runTxMode) (result Res
 
 		// run the message!
 		// skip actual execution for CheckTx mode
-		if mode != runTxModeCheck {
+		if mode != RunTxModeCheck {
 			msgResult = handler.Process(ctx, msg)
 		}
 
@@ -666,10 +664,10 @@ func (app *BaseApp) runMsgs(ctx Context, msgs []Msg, mode runTxMode) (result Res
 	return result
 }
 
-// Returns the applications's deliverState if app is in runTxModeDeliver,
+// Returns the applications's deliverState if app is in RunTxModeDeliver,
 // otherwise it returns the application's checkstate.
-func (app *BaseApp) getState(mode runTxMode) *state {
-	if mode == runTxModeCheck || mode == runTxModeSimulate {
+func (app *BaseApp) getState(mode RunTxMode) *state {
+	if mode == RunTxModeCheck || mode == RunTxModeSimulate {
 		return app.checkState
 	}
 
@@ -691,7 +689,7 @@ func (app *BaseApp) cacheTxContext(ctx Context, txBytes []byte) (
 // anteHandler. The provided txBytes may be nil in some cases, eg. in tests. For
 // further details on transaction execution, reference the BaseApp SDK
 // documentation.
-func (app *BaseApp) runTx(mode runTxMode, txBytes []byte, tx Tx) (result Result) {
+func (app *BaseApp) runTx(mode RunTxMode, txBytes []byte, tx Tx) (result Result) {
 	// NOTE: GasWanted should be returned by the AnteHandler. GasUsed is
 	// determined by the GasMeter. We need access to the context to get the gas
 	// meter so we initialize upfront.
@@ -699,7 +697,7 @@ func (app *BaseApp) runTx(mode runTxMode, txBytes []byte, tx Tx) (result Result)
 
 	ctx := app.getContextForTx(mode, txBytes)
 	ms := ctx.MultiStore()
-	if mode == runTxModeDeliver {
+	if mode == RunTxModeDeliver {
 		gasleft := ctx.BlockGasMeter().Remaining()
 		ctx = ctx.WithGasMeter(store.NewPassthroughGasMeter(
 			ctx.GasMeter(),
@@ -708,13 +706,13 @@ func (app *BaseApp) runTx(mode runTxMode, txBytes []byte, tx Tx) (result Result)
 	}
 
 	// only run the tx if there is block gas remaining
-	if mode == runTxModeDeliver && ctx.BlockGasMeter().IsOutOfGas() {
+	if mode == RunTxModeDeliver && ctx.BlockGasMeter().IsOutOfGas() {
 		result.Error = ABCIError(std.ErrOutOfGas("no block gas left to run tx"))
 		return
 	}
 
 	var startingGas int64
-	if mode == runTxModeDeliver {
+	if mode == RunTxModeDeliver {
 		startingGas = ctx.BlockGasMeter().GasConsumed()
 	}
 
@@ -753,7 +751,7 @@ func (app *BaseApp) runTx(mode runTxMode, txBytes []byte, tx Tx) (result Result)
 	// NOTE: This must exist in a separate defer function for the above recovery
 	// to recover from this one.
 	defer func() {
-		if mode == runTxModeDeliver {
+		if mode == RunTxModeDeliver {
 			ctx.BlockGasMeter().ConsumeGas(
 				ctx.GasMeter().GasConsumedToLimit(),
 				"block gas meter",
@@ -791,7 +789,7 @@ func (app *BaseApp) runTx(mode runTxMode, txBytes []byte, tx Tx) (result Result)
 		// to use something like passthroughGasMeter to
 		// account for ante handler gas usage, despite
 		// OutOfGasExceptions.
-		newCtx, result, abort := app.anteHandler(anteCtx, tx, mode == runTxModeSimulate)
+		newCtx, result, abort := app.anteHandler(anteCtx, tx, mode == RunTxModeSimulate)
 		if newCtx.IsZero() {
 			panic("newCtx must not be zero")
 		}
@@ -818,7 +816,7 @@ func (app *BaseApp) runTx(mode runTxMode, txBytes []byte, tx Tx) (result Result)
 	result.GasWanted = gasWanted
 
 	// Safety check: don't write the cache state unless we're in DeliverTx.
-	if mode != runTxModeDeliver {
+	if mode != RunTxModeDeliver {
 		return result
 	}
 
@@ -873,6 +871,15 @@ func (app *BaseApp) Commit() (res abci.ResponseCommit) {
 	app.deliverState.ms.MultiWrite()
 	commitID := app.cms.Commit()
 	app.logger.Debug("Commit synced", "commit", fmt.Sprintf("%X", commitID))
+
+	// Save this header.
+	baseStore := app.cms.GetStore(app.baseKey)
+	if baseStore == nil {
+		res.Error = ABCIError(errors.New("baseapp expects MultiStore with 'base' Store"))
+		return
+	}
+	headerBz := amino.MustMarshal(header)
+	baseStore.Set(mainLastHeaderKey, headerBz)
 
 	// Reset the Check state to the latest committed.
 	//
