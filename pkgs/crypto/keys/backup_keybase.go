@@ -86,7 +86,7 @@ func (i infoBk) GetPath() (*hd.BIP44Params, error) {
 	return nil, fmt.Errorf("BIP44 Paths are not available for this type")
 }
 
-//TODO: once reviewed, merge these methods to  /pkgs/crypto/keys/keybase.go and lazy_keybase.go
+//TODO: once reviewed passed, merge these methods to  /pkgs/crypto/keys/keybase.go and lazy_keybase.go
 func BackupAccount(kbBk Keybase, name, mnemonic, bip39Passwd, encryptPasswd string, account uint32, index uint32) (Info, error) {
 
 	coinType := crypto.CoinType
@@ -205,15 +205,18 @@ func writeLocalBkKey(kbBk Keybase, name string, bkKey crypto.PrivKey, primaryKey
 	return info.(*infoBk), err
 }
 
-
 // Sign uses primary key and backup key to sign the message with the multisig
-// The primary keybase and backup keybase must be accessible.
-
+// The primary keybase and backup keybase must be accessible at the same time, which
+// is more secure and not
+// the other option is to sign the the message with priamaryKey and back up KEY seperately.
+// TODO: A ADR This is also a trade off between usability and security and implementaion complexity.
+/*
 func Sign(kbPrimary Keybase, kbBk Keybase, name, passPhrase string, msg []byte) (sig []byte, pub crypto.PubKey, err error) {
 
-	kbPrimary.
 
 	//sign the message
+
+	return
 
 }
 
@@ -221,3 +224,4 @@ func Sign(kbPrimary Keybase, kbBk Keybase, name, passPhrase string, msg []byte) 
 func Verify(kbBk Keybase, name string, msg []byte, sig []byte) (err error) {
 
 }
+*/
