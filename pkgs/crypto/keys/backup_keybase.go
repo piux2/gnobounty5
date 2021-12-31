@@ -2,7 +2,6 @@ package keys
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/gnolang/gno/pkgs/amino"
+	dbm "github.com/gnolang/gno/pkgs/db"
 	"github.com/gnolang/gno/pkgs/std"
 
 	"github.com/gnolang/gno/pkgs/crypto"
@@ -20,8 +20,6 @@ import (
 	"github.com/gnolang/gno/pkgs/crypto/hd"
 	"github.com/gnolang/gno/pkgs/crypto/keys/armor"
 	"github.com/gnolang/gno/pkgs/sdk/vm"
-
-	"github.com/gnolang/gno/pkgs/crypto/secp256k1"
 
 	"github.com/gnolang/gno/pkgs/crypto/multisig"
 	"golang.org/x/crypto/ed25519"
@@ -98,18 +96,18 @@ func (i infoBk) GetPath() (*hd.BIP44Params, error) {
 	return nil, fmt.Errorf("BIP44 Paths are not available for this type")
 }
 
-//TODO: once reviewed passed, merge these methods to  /pkgs/crypto/keys/keybase.go and lazy_keybase.go
-func BackupAccount(kbBk Keybase, name, mnemonic, bip39Passwd, encryptPasswd string, account uint32, index uint32) (Info, error) {
+//TODO: once reviewed passed, merge this methods to  /pkgs/crypto/keys/keybase.go
+func BackupAccount(primaryPrivKey crypto.PrivKey, kbBk Keybase, name, mnemonic, bip39Passwd, encryptPasswd string, account uint32, index uint32) (Info, error) {
 
 	coinType := crypto.CoinType
 	hdPath := hd.NewFundraiserParams(account, coinType, index)
-	//create  a mnemonic
-	info, err := CreateAccountBip44(kbBk, name, mnemonic, bip39Passwd, encryptPasswd, *hdPath)
+	//create  a backup info
+	info, err := CreateBackupAccountBip44(primaryPrivKey, kbBk, name, mnemonic, bip39Passwd, encryptPasswd, *hdPath)
 	return info, err
 
 }
 
-func CreateAccountBip44(kbBk Keybase, name, mnemonic, bip39Passphrase, encryptPasswd string, params hd.BIP44Params) (Info, error) {
+func CreateBackupAccountBip44(primaryPrivKey crypto.PrivKey, kbBk Keybase, name, mnemonic, bip39Passphrase, encryptPasswd string, params hd.BIP44Params) (Info, error) {
 
 	//bip39 uses  PBKDF2 to hash the mnemonic. PBKDF2 is a pass word hash function and not a
 	// KDF which provides key extraction and extension
@@ -119,43 +117,37 @@ func CreateAccountBip44(kbBk Keybase, name, mnemonic, bip39Passphrase, encryptPa
 		return infoBk{}, err
 	}
 
-	info, err := persistBkKey(kbBk, seed, name, encryptPasswd, params.String())
+	info, err := persistBkKey(primaryPrivKey, kbBk, seed, name, encryptPasswd, params.String())
 	return info, err
 }
 
-// nake return and name return variable
-// persistBkKey uses the same seed to derive both primary key and backup key and
-// use primary key to sign the backup key info to key the backup key's integrity
-// TODO: review: create multisig threshold and adds to InfoBk. This way no need to
-// manage multisig process in seperate entity.
+//
+// persistBkKey uses primary key to sign the backup key info to key the backup key's integrity
 
-func persistBkKey(kbBk Keybase, seed []byte, name, passwd, fullHdPath string) (Info, error) {
-	//create master key and derive first key:
-	// masterPriv is from hmac no KDF performanced
-	masterPriv, ch := hd.ComputeMastersFromSeed(seed)
-
-	derivedPriv, err := hd.DerivePrivateKeyForPath(masterPriv, ch, fullHdPath)
-	if err != nil {
-		return infoBk{}, err
-	}
-
-	primaryKey := secp256k1.PrivKeySecp256k1(derivedPriv)
+func persistBkKey(primaryPrivKey crypto.PrivKey, kbBk Keybase, seed []byte, name, passwd, fullHdPath string) (Info, error) {
 
 	//The back up key need a simple Sha256 based KDF  which is different from the primary key
 
 	//We can use HKDF for KDF
 	//https://rfc-editor.org/rfc/rfc5869.html
-	// hkdf does not expect the salt to be a secret.
-	hash := sha256.New
-	salt := make([]byte, hash().Size())
-	if _, err := rand.Read(salt); err != nil {
-		panic(err)
-	}
+	// hkdf does not expect the salt to be a secret and is optional
+
+	/*
+		hash := sha256.New
+		salt := make([]byte, hash().Size())
+
+		if _, err := rand.Read(salt); err != nil {
+			panic(err)
+		}
+	*/
+	//TODO: should we use a hard coded salt?
+
+	var salt []byte
 	info := []byte("gnokey hkdf")
 	// the size of the privkey is 32 byte
 	expanedKeyReader := hkdf.New(sha256.New, seed, salt, info)
-	privKey := make([]byte, 32)
-	if _, err := io.ReadFull(expanedKeyReader, privKey); err != nil {
+	privBkKey := make([]byte, 32)
+	if _, err := io.ReadFull(expanedKeyReader, privBkKey); err != nil {
 
 		panic(err)
 	}
@@ -166,28 +158,28 @@ func persistBkKey(kbBk Keybase, seed []byte, name, passwd, fullHdPath string) (I
 	// ed25519 is used to generate public key from private key
 	// the returned a key (64 byte)  =  priveky(32 byte) + pubkey(32 byte)
 	// the first 32 byte is private key (see) and  the reset is public key
-	bkKey := ed25519.NewKeyFromSeed(privKey)
+	bkKey := ed25519.NewKeyFromSeed(privBkKey)
 
 	// cover to  PriveKeyEd25519 type used in gno
 	var privKeyEd gnoEd25519.PrivKeyEd25519
 	copy(privKeyEd[:], bkKey)
 
-	bkInfo, err := writeLocalBkKey(kbBk, name, privKeyEd, primaryKey, passwd)
+	bkInfo, err := writeLocalBkKey(kbBk, name, privKeyEd, primaryPrivKey, passwd)
 
 	return bkInfo, err
 }
 
-//backup key is a multisig
+//primary key + backup key is a 2/2 multisig threshold pubkey
 
 func writeLocalBkKey(kbBk Keybase, name string, bkKey crypto.PrivKey, primaryKey crypto.PrivKey, passphrase string) (Info, error) {
 
 	//TODO: updated the armored privKey file with correct passwd encryption notaion
 	// bcrypt is not KDF. It is a secure hash to protect the password
 	privArmor := armor.EncryptArmorPrivKey(bkKey, passphrase)
-	pub := bkKey.PubKey()
+	pub := bkKey.PubKey() // signle backup Key
 	info := newInfoBk(name, privArmor)
-	fmt.Println("back up PubKey", pub)
-	fmt.Println("privArmor", privArmor)
+	//fmt.Println("back up PubKey", pub)
+	//fmt.Println("privArmor", privArmor)
 
 	// sign  name+pubkey+privArmor + multisiginfo
 
@@ -203,16 +195,16 @@ func writeLocalBkKey(kbBk Keybase, name string, bkKey crypto.PrivKey, primaryKey
 
 	//TODO: disussion,  could use a document structure. json is simple and good enough  for now.
 	msg, err := json.Marshal(infobk)
-	fmt.Println("msg", msg)
+	//fmt.Println("msg", string(msg))
 
 	//  sign  name + PubKey + PrivKeyArmor + MultisgInfo
 	//  To show that the multisig is created by the primary key holder
 	infobk.Signature, err = primaryKey.Sign(msg)
-	fmt.Println("Signature", infobk.Signature)
+	//fmt.Println("Signature", infobk.Signature)
 
 	// attach the primary pubkey in the end. it is used to verify the signature and pubkey
 	infobk.PrimaryPubKey = primaryKey.PubKey()
-	fmt.Println("PrimaryPubkey", infobk.PrimaryPubKey.String())
+	//fmt.Println("PrimaryPubkey", infobk.PrimaryPubKey.String())
 
 	k := kbBk.(dbKeybase)
 
@@ -263,45 +255,47 @@ func signBackup(primaryPriv crypto.PrivKey, backupInfo infoBk, name, passPhrase 
 }
 
 // verifyBkInfo verify if the info entry in bkKeybase is modify by attackers.
-// It checks Pubkey, Signature
+// It checks Pubkey, Signature of infoBk
 // TODO: you don't need private key to validate signature with signer's PubKey
 //Here is used a shortcut solution since this function is only called by Sign() which has
 //privkey at the time calling verifyBkInfo already.
 
 func verifyBkInfo(binfo infoBk, primaryPrivKey crypto.PrivKey) (err error) {
+
+	var mPub multisig.PubKeyMultisigThreshold
+	var ok bool
+
 	primaryPubKey := primaryPrivKey.PubKey()
-	backupPubKey := binfo.GetPubKey()
+	backupMultiKeys := binfo.GetPubKey()
 
-	//check pubkey
+	if mPub, ok = backupMultiKeys.(multisig.PubKeyMultisigThreshold); ok {
 
-	if primaryPubKey.Equals(backupPubKey) == false {
+		//check pubkey
 
-		return errors.New("pubkey in back up info does not match with primary pubkey")
+		if primaryPubKey.Equals(mPub.PubKeys[0]) == false {
 
+			return fmt.Errorf("pubkey in back up info %v does not match with primary pubkey %v", mPub.PubKeys[0], primaryPubKey)
+
+		}
+
+	} else {
+
+		return fmt.Errorf("backup keybase is compromised: can assert the type %T", backupMultiKeys)
 	}
 
-	pubkeys := []crypto.PubKey{
-		primaryPubKey, //primary pubkey
-		backupPubKey,  //backup pubkey
-	}
+	// check signature
 
-	multisig := multisig.NewPubKeyMultisigThreshold(2, pubkeys)
-	mInfo := NewMultiInfo("backup", multisig)
+	backupPubKey := mPub.PubKeys[1]
 
-	//TODO: disussion,  could use a document structure. json is simple and good enough  for now.
-	msg, err := json.Marshal(mInfo)
-	fmt.Println("msg", msg)
+	infoBkSig, err := createInfoBkSignature(primaryPrivKey, primaryPubKey, backupPubKey, binfo.GetName(), binfo.PrivKeyArmor)
 
-	primarySig, err := primaryPrivKey.Sign(msg)
 	if err != nil {
 
 		return err
 
 	}
 
-	// check signature
-
-	if bytes.Equal(primarySig, binfo.Signature) == false {
+	if bytes.Equal(infoBkSig, binfo.Signature) == false {
 
 		return errors.New("infoBk's signature does not match with orignal")
 	}
@@ -309,11 +303,45 @@ func verifyBkInfo(binfo infoBk, primaryPrivKey crypto.PrivKey) (err error) {
 	return nil
 }
 
+func createInfoBkSignature(primaryPrivKey crypto.PrivKey, primaryPubKey, backupPubKey crypto.PubKey, name string, privkeyArmor string) (infoBkSig []byte, err error) {
+
+	// create infoBk
+	info := newInfoBk(name, privkeyArmor)
+	infobk := info.(*infoBk)
+	pubkeys := []crypto.PubKey{
+		primaryPubKey, //primary pubkey
+		backupPubKey,  //backup pubkey
+	}
+
+	multisig := multisig.NewPubKeyMultisigThreshold(2, pubkeys)
+	infobk.MultisigInfo = NewMultiInfo("backup", multisig)
+
+	//sign  name+pubkey+privArmor + multisiginfo
+	msg, err := json.Marshal(infobk)
+
+	infoBkSig, err = primaryPrivKey.Sign(msg)
+
+	return
+
+}
+
 //Todo merge it to keys/uitls.go
 const defaultBkKeyDBName = "keys_backup"
 
 func NewBkKeyBaseFromDir(rootDir string) (Keybase, error) {
-	return NewLazyDBKeybase(defaultBkKeyDBName, filepath.Join(rootDir, "data")), nil
+	//TODO: Remove this after BackupAccount() method are implemented in lazyDBKeybase
+	// create data directory and make sure the program has the rwx ownership of data directory
+	_ = NewLazyDBKeybase(defaultBkKeyDBName, filepath.Join(rootDir, "data"))
+
+	db, err := dbm.NewGoLevelDB(defaultBkKeyDBName, filepath.Join(rootDir, "data"))
+	if err != nil {
+
+		return nil, err
+	}
+
+	//defer db.Close()
+
+	return NewDBKeybase(db), nil
 }
 
 type SignerInfo struct {
@@ -329,7 +357,7 @@ func SignTx(kbPrimary Keybase, kbBackup Keybase, name, passPhrase string, unsign
 
 	if err != nil {
 
-		err = fmt.Errorf("%s does not exist in back up keybase", name)
+		err = fmt.Errorf("%s not found in primary keybase\n", name)
 		return signedTx, err
 	}
 	var primaryPriv crypto.PrivKey
@@ -363,6 +391,7 @@ func SignTx(kbPrimary Keybase, kbBackup Keybase, name, passPhrase string, unsign
 	backupInfo, err := kbBackup.Get(name)
 
 	if err != nil {
+		err = fmt.Errorf("%s not found in backup keybase. backup your %s first", name, name)
 		return signedTx, err
 	}
 	b := backupInfo.(infoBk)
@@ -388,30 +417,31 @@ func SignTx(kbPrimary Keybase, kbBackup Keybase, name, passPhrase string, unsign
 
 		case vm.MsgAddPackage:
 
-			msg, ok := msg.(vm.MsgAddPackage)
+			m, ok := msg.(vm.MsgAddPackage)
 			if !ok {
 
 				return signedTx, err
 
 			}
 
-			msg.Creator = multisigAddress
+			m.Creator = multisigAddress
+			msg = m
 
 		case vm.MsgCall:
 
-			msg, ok := msg.(vm.MsgCall)
+			m, ok := msg.(vm.MsgCall)
 			if !ok {
 
 				return signedTx, err
 
 			}
 
-			msg.Caller = multisigAddress
+			m.Caller = multisigAddress
+			msg = m
 
 		default:
 
-			fmt.Errorf("Msg type T% is not supported", msg)
-			return signedTx, err
+			return signedTx, fmt.Errorf("Msg type T% is not supported", msg)
 
 		}
 

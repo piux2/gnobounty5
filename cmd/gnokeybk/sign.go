@@ -11,19 +11,6 @@ import (
 	"github.com/gnolang/gno/pkgs/std"
 )
 
-type SignOptions struct {
-	client.BaseOptions         // home,...
-	TxPath             string  `flag:"txpath" help:"path to file of tx to sign"`
-	ChainID            string  `flag:"chainid" help:"chainid to sign for"`
-	AccountNumber      *uint64 `flag:"number" help:"account number to sign with (required)"`
-	Sequence           *uint64 `flag:"sequence" help:"sequence to sign with (required)"`
-}
-
-var DefaultSignOptions = SignOptions{
-	BaseOptions: client.DefaultBaseOptions,
-	TxPath:      "-", // read from stdin.
-}
-
 // replace the message sender/creater/signer to back key address if the message's sender address matches
 // the backup key's primary address.
 
@@ -31,7 +18,7 @@ func signBkApp(cmd *command.Command, args []string, iopts interface{}) error {
 	var kbPrimary keys.Keybase
 	var kbBackup keys.Keybase
 	var err error
-	var opts SignOptions = iopts.(SignOptions)
+	var opts client.SignOptions = iopts.(client.SignOptions)
 
 	if len(args) != 1 {
 		cmd.ErrPrintfln("Usage: sign <keyname>")

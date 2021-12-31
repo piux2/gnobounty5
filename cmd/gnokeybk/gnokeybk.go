@@ -27,14 +27,14 @@ func main() {
 	exec := os.Args[0]
 	args := os.Args[1:]
 
-	client.AddApp(backupKeyApp, "bkkey", "create a backup key to backup keybase", client.DefaultBaseOptions)
-	client.AddApp(signBkApp, "signbk", "sign a transaction with primary key and backup key", client.DefaultSignOptions)
-	client.AddApp(listBkApp, "listbk", "list all know key", client.DefaultListOptions)
+	client.AddApp(backupKeyApp, "bkkey", "create a backup key to a backup keybase", client.DefaultBaseOptions)
+	client.AddApp(signBkApp, "signbk", "sign a transaction with the primary key and backup key", client.DefaultSignOptions)
+	client.AddApp(listBkApp, "listbk", "list all know keys including back up keys", client.DefaultListOptions)
 
 	err := client.RunMain(cmd, exec, args)
 	if err != nil {
 		cmd.ErrPrintfln("%s", err.Error())
-		cmd.ErrPrintfln("%#v", err)
+		//cmd.ErrPrintfln("%#v", err)
 		return // exit
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"github.com/gnolang/gno/pkgs/command"
 	"github.com/gnolang/gno/pkgs/crypto/keys"
 	"github.com/gnolang/gno/pkgs/crypto/keys/client"
+	"github.com/gnolang/gno/pkgs/crypto/multisig"
 	"github.com/gnolang/gno/pkgs/errors"
 )
 
@@ -36,23 +37,31 @@ func listBkApp(cmd *command.Command, args []string, iopts interface{}) error {
 	}
 
 	infos, err := kb.List()
-	if err == nil {
-		printInfos(cmd, infos, "primary")
+	if err != nil {
+
+		return err
+
 	}
+
+	printInfos(cmd, infos, "primary")
 
 	cmd.Println("\n---------------------------")
 
 	infos, err = bkKeyBase.List()
-	if err == nil {
-		printInfos(cmd, infos, "backup")
-	}
+	if err != nil {
 
-	return err
+		return err
+
+	}
+	printInfos(cmd, infos, "backup")
+
+	return nil
 }
 
 func printInfos(cmd *command.Command, infos []keys.Info, keybaseName string) {
 
 	cmd.Printfln("Keybase %s", keybaseName)
+	var keypubString string
 
 	for i, info := range infos {
 		keyname := info.GetName()
@@ -60,7 +69,24 @@ func printInfos(cmd *command.Command, infos []keys.Info, keybaseName string) {
 		keypub := info.GetPubKey()
 		keyaddr := info.GetAddress()
 		keypath, _ := info.GetPath()
-		cmd.Printfln("%d. %s (%s) - addr: %v pub: %v, path: %v",
-			i, keyname, keytype, keyaddr, keypub, keypath)
+		keypubString = ""
+
+		if mPub, ok := keypub.(multisig.PubKeyMultisigThreshold); ok {
+
+			for _, pub := range mPub.PubKeys {
+
+				keypubString = keypubString + pub.String() + " | "
+			}
+
+		} else {
+
+			keypubString = keypub.String()
+		}
+
+		cmd.Printfln("%d. %s (%s) - addr: %v pub: %v, path: %v\n",
+			i, keyname, keytype, keyaddr, keypubString, keypath)
+
+		//TODO: implement PubKeyMultisigThreshold.String()
+
 	}
 }
