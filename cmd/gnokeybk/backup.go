@@ -136,8 +136,8 @@ It is the only way to recover your back up account if you ever forget your passw
 		}
 	*/
 
-	cmd.Printfln("Backup key  is created for primary key address\n%s", addr)
-	cmd.Printfln("Backup key's multisig address is \n%s", addrbk.String())
+	cmd.Printfln("\nBackup key  is created for primary key address\n%s", addr)
+	cmd.Printfln("\nBackup key's multisig address is \n%s", addrbk.String())
 
 	return nil
 }

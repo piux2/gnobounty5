@@ -1,4 +1,4 @@
-all: gnoland gnokey goscan logos
+all: gnoland gnokey goscan logos gnokeybk 
 
 .PHONY: logos goscan gnoland gnokey logos reset
 
