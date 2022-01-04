@@ -46,7 +46,7 @@ Security > Useability > Simple implementation
 
 I extended gnokey to gnokeybk which is backward compatible
 
-#### bkkey sub command
+#### bkkey sub command:
 
 it generates a backup key:
 
@@ -61,17 +61,25 @@ it generates a backup key:
 
 
 
-#### listbk sub command
+#### listbk sub command:
 
 It lists the primary key and backup key from two different key stores.
 
-#### sign sub command
+#### sign sub command:
 It retrieves the primary key and backup key from Keystore sign the transaction, combine signatures in one transaction with multisig pubkeys. During the process, it also verifies the backup key integrity stored in the backup key store.
+
+#### changes in the forked code base.
 
 To minimize the impact to the code base before the implementation is reviewed. I wrote all the relevant files in gno/pkgs/crypto/keys/backup_keybase.go and gno/cmd/gnokeybk/  
 	 once we review it and approve the implementation. these codes can be merged back to the existing framework.
 
+There are two additional minor updates on the forked code base.
+Registered infoBk package
+github.com/gnolang/gno/pkgs/package.go
 
+
+Added backup key multisig address in genesis state
+github.com/gnolang/gno/cmd/gnoland/main.go
 
 
 ## Discussions.

@@ -1,6 +1,6 @@
 
 
-## Intall
+## Install
 
       git clone https://github.com/piux2/gnobounty5
 
