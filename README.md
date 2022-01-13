@@ -1,3 +1,17 @@
+# Bounty5
+
+Problem Definition
+
+https://github.com/gnolang/bounties/issues/15
+
+Solution
+
+https://github.com/piux2/gnobounty5/blob/master/bounty5solution.md
+
+Instruction
+
+https://github.com/piux2/gnobounty5/blob/master/bounty5instruction.md
+
 # Gno
 
 At first, there was Bitcoin, out of entropy soup of the greater All.
